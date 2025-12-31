@@ -1,0 +1,261 @@
+import { useState, useEffect } from "react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Plus } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { toast } from "sonner";
+import { useAuth } from "@/hooks/useAuth";
+
+export function CreateProductionDialog({ onProductionCreated }: { onProductionCreated: () => void }) {
+    const [open, setOpen] = useState(false);
+    const [loading, setLoading] = useState(false);
+
+    const [products, setProducts] = useState<Array<{ urun_id: number; ad: string }>>([]);
+    const [machines, setMachines] = useState<Array<{ makine_id: number; ad: string; isActive?: boolean; activeDetail?: any }>>([]);
+
+    const getLocalNow = () => {
+        const now = new Date();
+        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+        return now.toISOString().slice(0, 16);
+    };
+
+    const [formData, setFormData] = useState({
+        urun_id: "",
+        makine_id: "",
+        hedef_adet: "100",
+        baslangic_uretilen: "0",
+        baslama_zamani: getLocalNow(),
+    });
+
+    useEffect(() => {
+        if (open) {
+            setFormData(prev => ({ ...prev, baslama_zamani: getLocalNow() }));
+            fetchOptions();
+        }
+    }, [open]);
+
+    const fetchOptions = async () => {
+        try {
+            const { data: pData, error: pError } = await supabase
+                .from("urun")
+                .select("urun_id, ad")
+                .order("ad");
+
+            if (pError) throw pError;
+            setProducts(pData || []);
+            const { data: activeData, error: activeError } = await supabase
+                .from("uretim_kayit")
+                .select(`
+                    makine_id, 
+                    hedef_adet, 
+                    uretilen_adet, 
+                    urun (ad),
+                    baslama_zamani
+                `)
+                .is("bitis_zamani", null);
+
+            if (activeError) throw activeError;
+
+            const activeMachineMap = new Map();
+            (activeData || []).forEach((item: any) => {
+                const oran = item.hedef_adet > 0
+                    ? Math.round((item.uretilen_adet / item.hedef_adet) * 100)
+                    : 0;
+
+                const baslangic = new Date(item.baslama_zamani);
+                const saat = baslangic.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+
+                activeMachineMap.set(item.makine_id, {
+                    urunAd: item.urun?.ad || 'Bilinmiyor',
+                    oran: oran,
+                    baslangic: saat
+                });
+            });
+
+            const { data: mData, error: mError } = await supabase
+                .from("makine")
+                .select("makine_id, ad")
+                .order("ad");
+
+            if (mError) throw mError;
+
+            const machinesWithStatus = (mData || []).map((m: any) => ({
+                ...m,
+                isActive: activeMachineMap.has(m.makine_id),
+                activeDetail: activeMachineMap.get(m.makine_id)
+            }));
+
+            setMachines(machinesWithStatus);
+
+        } catch (error) {
+            console.error("Seçenekler yüklenirken hata:", error);
+            toast.error("Veriler yüklenemedi");
+        }
+    };
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setLoading(true);
+
+        try {
+            if (!formData.urun_id || !formData.makine_id) {
+                toast.error("Lütfen ürün ve makine seçiniz");
+                return;
+            }
+
+            const { data: lastRecord, error: lastRecordError } = await supabase
+                .from("uretim_kayit")
+                .select("uretim_id")
+                .order("uretim_id", { ascending: false })
+                .limit(1)
+                .maybeSingle();
+
+            if (lastRecordError) throw lastRecordError;
+
+            const nextId = (lastRecord?.uretim_id || 0) + 1;
+
+            const { error } = await supabase
+                .from("uretim_kayit")
+                .insert({
+                    uretim_id: nextId,
+                    urun_id: parseInt(formData.urun_id),
+                    makine_id: parseInt(formData.makine_id),
+                    baslama_zamani: new Date(formData.baslama_zamani).toISOString(),
+                    hedef_adet: parseInt(formData.hedef_adet) || 100,
+                    uretilen_adet: parseInt(formData.baslangic_uretilen) || 0,
+                    fire_adet: 0
+                } as any);
+
+            if (error) throw error;
+
+            toast.success("Üretim kaydı oluşturuldu");
+            setOpen(false);
+            onProductionCreated(); 
+            setFormData({
+                urun_id: "",
+                makine_id: "",
+                hedef_adet: "100",
+                baslangic_uretilen: "0",
+                baslama_zamani: getLocalNow(),
+            });
+
+        } catch (error: any) {
+            console.error("Üretim ekleme hatası:", error);
+            toast.error("Kayıt oluşturulamadı: " + error.message);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <Dialog open={open} onOpenChange={setOpen}>
+            <DialogTrigger asChild>
+                <Button className="gap-2 bg-primary hover:bg-primary/90">
+                    <Plus className="w-4 h-4" />
+                    Yeni Üretim
+                </Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-md bg-card text-card-foreground border-border">
+                <DialogHeader>
+                    <DialogTitle>Yeni Üretim Başlat</DialogTitle>
+                    <DialogDescription>
+                        Manuel olarak bir üretim kaydı oluşturun.
+                    </DialogDescription>
+                </DialogHeader>
+                <form onSubmit={handleSubmit} className="space-y-4">
+                    <div className="space-y-2">
+                        <Label htmlFor="urun">Ürün</Label>
+                        <Select
+                            value={formData.urun_id}
+                            onValueChange={(val) => setFormData({ ...formData, urun_id: val })}
+                        >
+                            <SelectTrigger className="bg-secondary border-border text-foreground">
+                                <SelectValue placeholder="Ürün Seçin" />
+                            </SelectTrigger>
+                            <SelectContent className="bg-secondary border-border text-foreground">
+                                {products.map((p) => (
+                                    <SelectItem key={p.urun_id} value={String(p.urun_id)}>
+                                        {p.ad}
+                                    </SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
+                    </div>
+
+                    <div className="space-y-2">
+                        <Label htmlFor="makine">Makine</Label>
+                        <Select
+                            value={formData.makine_id}
+                            onValueChange={(val) => setFormData({ ...formData, makine_id: val })}
+                        >
+                            <SelectTrigger className="bg-secondary border-border text-foreground">
+                                <SelectValue placeholder="Makine Seçin" />
+                            </SelectTrigger>
+                            <SelectContent className="bg-secondary border-border text-foreground">
+                                {machines.map((m) => (
+                                    <SelectItem key={m.makine_id} value={String(m.makine_id)} disabled={m.isActive}>
+                                        {m.ad} {m.isActive ? `(DOLU | ${m.activeDetail?.urunAd} | Baş: ${m.activeDetail?.baslangic} | %${m.activeDetail?.oran})` : ''}
+                                    </SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                            <Label htmlFor="hedef_adet">Hedef Adet</Label>
+                            <Input
+                                id="hedef_adet"
+                                type="number"
+                                min="1"
+                                value={formData.hedef_adet}
+                                onChange={(e) => setFormData({ ...formData, hedef_adet: e.target.value })}
+                                className="bg-secondary border-border text-foreground"
+                            />
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="baslangic_uretilen">Başlangıç Üretilen</Label>
+                            <Input
+                                id="baslangic_uretilen"
+                                type="number"
+                                min="0"
+                                value={formData.baslangic_uretilen}
+                                onChange={(e) => setFormData({ ...formData, baslangic_uretilen: e.target.value })}
+                                className="bg-secondary border-border text-foreground"
+                            />
+                        </div>
+                    </div>
+
+                    <div className="space-y-2">
+                        <Label htmlFor="baslama">Başlama Zamanı</Label>
+                        <Input
+                            id="baslama"
+                            type="datetime-local"
+                            value={formData.baslama_zamani}
+                            onChange={(e) => setFormData({ ...formData, baslama_zamani: e.target.value })}
+                            className="bg-secondary border-border text-foreground"
+                        />
+                    </div>
+
+                    <div className="flex justify-end gap-2 pt-4">
+                        <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => setOpen(false)}
+                            disabled={loading}
+                            className="border-border text-foreground hover:bg-secondary"
+                        >
+                            İptal
+                        </Button>
+                        <Button type="submit" disabled={loading}>
+                            {loading ? "Kaydediliyor..." : "Oluştur"}
+                        </Button>
+                    </div>
+                </form>
+            </DialogContent>
+        </Dialog>
+    );
+}
